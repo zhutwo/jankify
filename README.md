@@ -1,6 +1,6 @@
 # jankify (jankiPy?)
 
-blender script that cartoonifies your run of the mill Synty-style asset flip models into 
+blender script that distorts your run of the mill Synty-style asset flip models into that janky cartoon style inspired by games such as Psychonauts
 
 conversion to blender add-on in progress
 
