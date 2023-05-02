@@ -5,264 +5,225 @@
 
 # MAKE SURE THE FILE IS SAVED FIRST! Otherwise it won't locate the necessary folders.
 
-
-import bmesh
-import bpy  # used for auto-complete outside of Blender
 import math
 import os
 import random
 from datetime import datetime
+from enum import Enum
+import bmesh
+import bpy
+
+bl_info = {
+    "name": "Jankify",
+    "blender": (2, 80, 0),
+    "category": "Object",
+}
 
 input_folder = os.path.dirname(bpy.data.filepath) + '\\input'
 output_folder = os.path.dirname(bpy.data.filepath) + '\\output'
 log_folder = os.path.dirname(bpy.data.filepath) + '\\logs'
 
 
-def main(d_mode=0, k_fat=4, k_jank=0.15):
+class DistanceMode(Enum):
+    AVG = 0
+    MIN = 1
+    MAX = 2
 
+
+def main(d_mode:DistanceMode, fat_factor:float, jank_factor:float):
     print("Hi! I'm going to parse the input folder :)")
-
-    if (not os.path.exists(input_folder)):
+    if not os.path.exists(input_folder):
         print("I'll need input and output folders. Please make these:")
         print(input_folder + "\\")
         print(output_folder + "\\")
         return
-
-    if (not os.path.exists(log_folder)):
+    if not os.path.exists(log_folder):
         print("Log folder not found. Making one...")
         os.mkdir(log_folder)
 
     log_path = os.path.join(log_folder, datetime.today().strftime(
-        '%Y-%m-%d-%H-%M-%S')) + "-chunkifier.txt"
+        '%Y-%m-%d-%H-%M-%S')) + "-jankifier.txt"
     log_file = open(log_path, "w")
 
     fbx_count = 0
     for entry in os.scandir(input_folder):
-        if (entry.path.endswith(".fbx") and entry.is_file()):
+        if entry.path.endswith(".fbx") and entry.is_file():
             fbx_count += 1
-            process_file(entry.path, log_file, d_mode, k_fat, k_jank)
-
+            process_file(entry.path, d_mode, fat_factor, jank_factor)
     print(f'Processed {fbx_count} files from {input_folder}\\')
-
     log_file.close()
 
 
-def process_file(import_path, log_file, d_mode, k_fat, k_jank):
-
-    # Locate the model to import.
+def process_file(import_path:str, d_mode:DistanceMode, fat_factor:float, jank_factor:float):
     print(f'Processing { import_path }...')
     bpy.ops.import_scene.fbx(filepath=import_path)
-
-    # Select all objects in the scene.
     bpy.ops.object.select_all(action='SELECT')
-
-    # Are there multiple objects in the scene?
-    has_multiple_objects = len(bpy.context.selected_objects) > 1
-    print(f'has_multiple_objects: { has_multiple_objects }.')
-
-    # Log file name
-    if has_multiple_objects:
-        log_file.write(os.path.join(os.path.basename(import_path), "\n"))
-
-    # Assign a target. Without an active object, Blender will throw an error when entering EDIT mode
-    target = bpy.context.selected_objects[0]
-    bpy.context.view_layer.objects.active = target
-
-    # Apply a Shrink/Fatten modifier.
-    if k_fat != 0:
-        fatten(target, k_fat)
-
-    # Apply scale before saving
-    bpy.ops.object.transform_apply(scale=True, location=False, rotation=True)
-
-    # Nudge vertices in random directions.
-    jankify(target, d_mode, k_jank)
-
-    # Determine output path and save the file.
+    process_selection(d_mode, fat_factor, jank_factor)
     output_path = str(import_path).replace("input", "output")
     bpy.ops.export_scene.fbx(filepath=output_path, path_mode='ABSOLUTE')
-
-    # Clean up after ourselves. Remove any remaining models.
     bpy.ops.object.delete()
 
 
-def fatten(target, k_fat):
+def process_selection(d_mode:DistanceMode, fat_factor:float, jank_factor:float):
+    for target in bpy.context.selected_objects:
+        # assign active object - necessary for blender to not throw error when entering EDIT mode
+        bpy.context.view_layer.objects.active = target
+        if fat_factor != 0:
+            fatten(target, fat_factor)
+        bpy.ops.object.transform_apply(scale=True, location=False, rotation=True)
+        jankify(target, d_mode, jank_factor)
 
-    # Get the longest side
+
+def fatten(target, fat_factor:float):
+    # get the longest side
     longest = target.dimensions[0]
-    if (target.dimensions[1] > longest):
+    if target.dimensions[1] > longest:
         longest = target.dimensions[1]
-    if (target.dimensions[2] > longest):
+    if target.dimensions[2] > longest:
         longest = target.dimensions[2]
-
-    # How much to fatten the item.
-    fat_factor = longest * k_fat
-
-    # Switch to EDIT mode. Context is now different.
+    # how much to fatten the item.
+    fat_factor = longest * fat_factor
     bpy.ops.object.mode_set(mode='EDIT')
-
-    # Select all vertices and shrink / fatten
     bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.transform.shrink_fatten(value=fat_factor)
-
-    # De-select, to return to object mode.
     bpy.ops.object.mode_set(mode='OBJECT')
 
 
-def jankify(target, d_mode, k_jank):
-
-    # Switch to EDIT mode. Required for bmesh
+def jankify(target, d_mode:DistanceMode, jank_factor:float, sphere_ratio:float=0.5, dist_ratio:float=0.5):
+    # switch to EDIT mode - required for bmesh
     bpy.ops.object.mode_set(mode='EDIT')
-
-    sphere_ratio = 0.5
-    dist_ratio = 0.5
-
-    tm = bmesh.from_edit_mesh(target.data)
-    # Necessary - https://blender.stackexchange.com/a/31750
-    tm.verts.ensure_lookup_table()
+    target_mesh = bmesh.from_edit_mesh(target.data)
+    # necessary - https://blender.stackexchange.com/a/31750
+    target_mesh.verts.ensure_lookup_table()
 
     neighbours = {}
-    for vert in tm.verts:
+    for vert in target_mesh.verts:
         neighbours[vert] = get_adjacent_vertices(vert)
 
-    for vert in tm.verts:
-
-        _sum = 0.0
-        _count = 0
+    for vert in target_mesh.verts:
+        count = 0
+        total_dist = 0.0
         max_dist = None
         min_dist = None
         dist_vectors = []
-
-        for n in neighbours[vert]:
-            dist = get_distance_between(vert.co, n)
-            vec = subtract(n, vert.co)
-            obj = {'d': dist, 'v': vec}
+        
+        # collect data on neighbouring vertices
+        for neighbour in neighbours[vert]:
+            dist = distance_between_vectors(vert.co, neighbour)
+            vec = vector_subtract(neighbour, vert.co)
+            obj = {'dist': dist, 'vec': vec}
             dist_vectors.append(obj)
-            if max_dist == None:
+            if max_dist is None:
                 max_dist = dist
             elif dist > max_dist:
                 max_dist = dist
-            if min_dist == None:
+            if min_dist is None:
                 min_dist = dist
             elif dist < min_dist:
                 min_dist = dist
-            _sum += dist
-            _count += 1
-            print(f'original: {vert.co} \nneighbor: {n}')
-
-        print("-----------------------")
-
-        avg_dist = _sum/_count
-        rand_bias = [0.0, 0.0, 0.0]
-
+            total_dist += dist
+            count += 1
+            # print(f'original: {vert.co} \nneighbor: {neighbour}')
+        # print("-----------------------")
+        avg_dist = total_dist/count
+        bias_vector = [0.0, 0.0, 0.0]
+        
+        # get a bias vector based on proximity of neighbouring vertices
         for obj in dist_vectors:
-            weight = (1.0 - obj['d']/max_dist)/_count
-            bias_vector = scale(normalize(obj['v']), weight)
-            rand_bias = subtract(rand_bias, bias_vector)
-
-        rand_vector = [random.random()*2.0 - 1.0 + rand_bias[0], random.random()
-                       * 2.0 - 1.0 + rand_bias[1], random.random()*2.0 - 1.0 + rand_bias[2]]
-        rand_vector = normalize(rand_vector)
+            weight = (1.0 - obj['dist']/max_dist)/count
+            vec = vector_scale(vector_normalize(obj['vec']), weight)
+            bias_vector = vector_subtract(bias_vector, vec)
+        # generate random vector and skew the direction slightly toward the bias vector
+        rand_vector = [random.random()*2.0 - 1.0 + bias_vector[0], random.random()
+                       * 2.0 - 1.0 + bias_vector[1], random.random()*2.0 - 1.0 + bias_vector[2]]
+        rand_vector = vector_normalize(rand_vector)
         rand_factor = random.random()
-        if d_mode == 0:
-            d = avg_dist
-        elif d_mode == 1:
-            d = min_dist
-        elif d_mode == 2:
-            d = max_dist
-        else:
-            print("ERROR: Invalid d_mode parameter!")
-            return
-        rand_length = rand_factor * k_jank * d
-        rand_vector = scale(rand_vector, rand_length)
-
-        for n in neighbours[vert]:
-            v = subtract(n, vert.co)
-            theta = abs(get_angle_between(rand_vector, v))
-            if theta < math.pi/3.0:  # if neighbour vector is within 120 degrees of random vector and at risk of conflict
-                dist = length(v)
+        # set distance factor to corresponding distance mode
+        if d_mode == DistanceMode.AVG:
+            dist_factor = avg_dist
+        elif d_mode == DistanceMode.MIN:
+            dist_factor = min_dist
+        elif d_mode == DistanceMode.MAX:
+            dist_factor = max_dist
+        # scale the normalized vector based on desired jank factor and distance factor
+        rand_length = rand_factor * jank_factor * dist_factor
+        rand_vector = vector_scale(rand_vector, rand_factor * jank_factor * dist_factor)
+        
+        # check that the random vector doesn't extend too close to neighbouring vertices
+        for neighbour in neighbours[vert]:
+            vec_to_n = vector_subtract(neighbour, vert.co)
+            angle = abs(angle_between_vectors(rand_vector, vec_to_n))
+            # if neighbour vert is within 90deg of random vector
+            if angle < math.pi/2.0:
+                dist = vector_length(vec_to_n)
                 sphere_radius = dist * sphere_ratio
                 # if random vector intersects exclusion sphere around neighbour
-                if math.sin(theta) * dist < sphere_radius:
+                if math.sin(angle) * dist < sphere_radius:
                     sect_dist = find_intersect_distance(
-                        sphere_radius, theta, dist)
+                        sphere_radius, angle, dist)
                     if rand_length > sect_dist:
                         # recalculate length using exclusion sphere distance
-                        rand_vector = scale(
-                            normalize(rand_vector), sect_dist * rand_factor)
+                        rand_vector = vector_scale(
+                            vector_normalize(rand_vector), sect_dist * rand_factor)
                 else:
                     if rand_length > dist * dist_ratio:
                         # recalculate length using max distance ratio
-                        rand_vector = scale(
-                            normalize(rand_vector), dist * dist_ratio * rand_factor)
-
-        # not sure if have to assign as temp var first
-        vert.co = add(vert.co, rand_vector)
-
-    # De-select, to return to object mode.
+                        rand_vector = vector_scale(
+                            vector_normalize(rand_vector), dist * dist_ratio * rand_factor)
+        vert.co = vector_add(vert.co, rand_vector)
+    # de-select, to return to object mode
     bpy.ops.object.mode_set(mode='OBJECT')
 
 
-### HELPERS
+# HELPERS
 
-def find_intersect_distance(radius, theta, dist):
-    l_opp = math.sin(theta) * dist
+def find_intersect_distance(radius, angle, dist):
+    l_opp = math.sin(angle) * dist
     l_adj_radius = math.sqrt(radius*radius - l_opp*l_opp)
-    l_adj_dist = math.cos(theta) * dist
-    l_final = l_adj_dist - l_adj_radius
-    return l_final
+    l_adj_dist = math.cos(angle) * dist
+    return l_adj_dist - l_adj_radius
 
 
-def get_angle_between(v1, v2):
-    angle = math.acos((v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]) / (math.sqrt(v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]) * math.sqrt(v2[0]*v2[0] + v2[1]*v2[1] + v2[2]*v2[2])))
-    return angle
+def angle_between_vectors(vec1, vec2):
+    return math.acos((vec1[0]*vec2[0] + vec1[1]*vec2[1] + vec1[2]*vec2[2]) / (math.sqrt(vec1[0]*vec1[0] + vec1[1]*vec1[1] + vec1[2]*vec1[2]) * math.sqrt(vec2[0]*vec2[0] + vec2[1]*vec2[1] + vec2[2]*vec2[2])))
 
 
-def get_distance_between(v1, v2):
-    v = subtract(v1, v2)
-    dist = length(v)
-    return dist
+def distance_between_vectors(vec1, vec2):
+    vec = vector_subtract(vec1, vec2)
+    return vector_length(vec)
 
 
-def length(v):
-    length = math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2])
-    return length
+def vector_normalize(vec):
+    l = vector_length(vec)
+    return [vec[0]/l, vec[1]/l, vec[2]/l]
 
 
-def normalize(v):
-    l = length(v)
-    normalized = [v[0]/l, v[1]/l, v[2]/l]
-    return normalized
+def vector_length(vec):
+    return math.sqrt(vec[0]*vec[0] + vec[1]*vec[1] + vec[2]*vec[2])
 
 
-def scale(v, f):
-    v = [v[0]*f, v[1]*f, v[2]*f]
-    return v
+def vector_scale(vec, scale):
+    return [vec[0]*scale, vec[1]*scale, vec[2]*scale]
 
 
-def add(v1, v2):
-    v = [v1[0] + v2[0], v1[1] + v2[1], v1[2] + v2[2]]
-    return v
+def vector_add(vec1, vec2):
+    return [vec1[0] + vec2[0], vec1[1] + vec2[1], vec1[2] + vec2[2]]
 
 
-def subtract(v1, v2):
-    v = [v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2]]
-    return v
+def vector_subtract(vec1, vec2):
+    return [vec1[0] - vec2[0], vec1[1] - vec2[1], vec1[2] - vec2[2]]
 
 
-def get_adjacent_vertices(v):
+def get_adjacent_vertices(vert):
     # print(v.link_edges)
     adjacent = []
-
-    for edge in v.link_edges:
-        v_other = edge.other_vert(v)
+    for edge in vert.link_edges:
+        v_other = edge.other_vert(vert)
         # print("%d -> %d via edge %d" % (v.index, v_other.index, e.index))
         adjacent.append(list(v_other.co))
-
     # print(f'adjacent: {adjacent}')
     return adjacent
 
 
-### RUN
-# d_mode: 0 = avg, 1 = min, 2 = max (mode for distance calculation)
-main(d_mode=0, k_fat=2, k_jank=0.15)
+# RUN
+main(d_mode=0, fat_factor=2, jank_factor=0.15)
